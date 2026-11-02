@@ -17,10 +17,10 @@ module "vpc" {
   public_subnets  = [for k, v in local.azs : cidrsubnet(var.vpc_cidr, 4, k)]
   private_subnets = [for k, v in local.azs : cidrsubnet(var.vpc_cidr, 4, k + 4)]
 
-  # Production high-availability egress
+  # Cost-optimized egress: single NAT Gateway across AZs
   enable_nat_gateway     = true
-  single_nat_gateway     = false
-  one_nat_gateway_per_az = true
+  single_nat_gateway     = var.single_nat_gateway
+  one_nat_gateway_per_az = !var.single_nat_gateway
   enable_dns_hostnames   = true
   enable_dns_support     = true
 
@@ -65,10 +65,10 @@ module "eks" {
   cluster_endpoint_public_access_cidrs = var.allowed_cidr_blocks
   cluster_endpoint_private_access      = true
 
-  # Control Plane Logging & Encryption
-  cluster_enabled_log_types              = ["api", "audit", "authenticator", "controllerManager", "scheduler"]
-  create_cloudwatch_log_group            = true
-  cloudwatch_log_group_retention_in_days = 90
+  # Control Plane Logging (disabled or minimal for cost savings)
+  cluster_enabled_log_types              = var.enable_cluster_logging ? ["api", "audit", "authenticator", "controllerManager", "scheduler"] : []
+  create_cloudwatch_log_group            = var.enable_cluster_logging
+  cloudwatch_log_group_retention_in_days = 7
 
   create_kms_key = false
   cluster_encryption_config = {
@@ -128,10 +128,11 @@ module "eks" {
     }
   }
 
-  # Managed Node Groups Defaults (Security Hardening)
+  # Managed Node Groups Defaults (Cost-Optimized & Secure)
   eks_managed_node_group_defaults = {
     ami_type       = "AL2023_x86_64_STANDARD"
-    instance_types = ["m6i.xlarge", "m5.xlarge"]
+    instance_types = var.node_instance_types
+    capacity_type  = var.node_capacity_type
 
     # Enforce IMDSv2 (mitigates SSRF credential exfiltration)
     metadata_options = {
@@ -140,12 +141,12 @@ module "eks" {
       http_put_response_hop_limit = 1
     }
 
-    # Encrypted root storage
+    # Encrypted root storage (Right-sized for cost savings)
     block_device_mappings = {
       xvda = {
         device_name = "/dev/xvda"
         ebs = {
-          volume_size           = 100
+          volume_size           = var.node_disk_size
           volume_type           = "gp3"
           iops                  = 3000
           throughput            = 125
@@ -156,37 +157,17 @@ module "eks" {
     }
   }
 
-  # Primary Production System Workload Node Group
+  # Consolidated Worker Node Group (Runs both system addons and applications)
   eks_managed_node_groups = {
-    system_nodes = {
-      name         = "ng-system"
-      subnet_ids   = module.vpc.private_subnets
-      min_size     = 3
-      max_size     = 6
-      desired_size = 3
-
-      labels = {
-        role = "system-critical"
-      }
-
-      taints = {
-        dedicated = {
-          key    = "CriticalAddonsOnly"
-          value  = "true"
-          effect = "NO_SCHEDULE"
-        }
-      }
-    }
-
     general_workloads = {
       name         = "ng-general"
       subnet_ids   = module.vpc.private_subnets
-      min_size     = 3
-      max_size     = 15
-      desired_size = 6
+      min_size     = var.node_min_size
+      max_size     = var.node_max_size
+      desired_size = var.node_desired_size
 
       labels = {
-        role = "apps"
+        role = "general"
       }
     }
   }
